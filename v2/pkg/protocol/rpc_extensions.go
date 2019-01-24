@@ -312,6 +312,23 @@ func (m *ApplyResponse) Validate() error {
 	return nil
 }
 
+func (m *FragmentsRequest) Validate() error {
+	if m.Header != nil {
+		if err := m.Header.Validate(); err != nil {
+			return ExtendContext(err, "Header")
+		}
+	}
+	if err := m.Journal.Validate(); err != nil {
+		return ExtendContext(err, "Journal")
+	}
+	if !(m.Begin.IsZero() && m.End.IsZero()) &&
+		m.End.Before(m.Begin) {
+		return NewValidationError("invalid End (%v; must be before the Begin)", m.End)
+	}
+
+	return nil
+}
+
 // Validate returns an error if the Status is not well-formed.
 func (x Status) Validate() error {
 	if _, ok := Status_name[int32(x)]; !ok {
