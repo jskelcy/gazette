@@ -476,7 +476,7 @@ message FragmentsResponse {
 
   message FragmentTuple {
     Fragment fragment = 1;
-    string singedURL =2;
+    string signedURL = 2;
   }
 
   repeated FragmentTuple fragments = 3;

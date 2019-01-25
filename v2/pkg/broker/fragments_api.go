@@ -41,12 +41,31 @@ func (svc *Service) Fragments(ctx context.Context, req *pb.FragmentsRequest) (*p
 		return svc.jc.Fragments(ctx, req)
 	}
 
-	var tuples []*pb.FragmentsResponse_FragmentTuple
-	tuples, err = serveFragments(ctx, req, res.journalSpec, res.replica.index)
-	if err != nil {
-		return nil, pb.ExtendContext(err, "error fetching fragments")
+	return serveFragments(ctx, req, res.journalSpec, res.replica.index)
+}
+
+func serveFragments(
+	ctx context.Context,
+	req *pb.FragmentsRequest,
+	spec *pb.JournalSpec,
+	index *fragment.Index,
+) (*pb.FragmentsResponse, error) {
+	if req.SignatureTTL == nil {
+		req.SignatureTTL = &defaultSignatureTTL
+	}
+	if req.PageLimit == 0 {
+		req.PageLimit = int32(defaultPageLimit)
 	}
 
+	var fragmentSet fragment.CoverSet
+	var err error
+	fragmentSet, err = fragment.WalkAllStores(ctx, req.Journal, spec.Fragment.Stores)
+	if err != nil {
+		return nil, err
+	}
+
+	var tuples []*pb.FragmentsResponse_FragmentTuple
+	tuples, err = getFragmentTuples(req, fragmentSet)
 	var resp = &pb.FragmentsResponse{
 		Status:    pb.Status_OK,
 		Fragments: tuples,
@@ -60,36 +79,11 @@ func (svc *Service) Fragments(ctx context.Context, req *pb.FragmentsRequest) (*p
 	return resp, nil
 }
 
-func serveFragments(
-	ctx context.Context,
+func getFragmentTuples(
 	req *pb.FragmentsRequest,
-	spec *pb.JournalSpec,
-	index *fragment.Index,
+	fragmentSet fragment.CoverSet,
 ) ([]*pb.FragmentsResponse_FragmentTuple, error) {
-	var signatureTTL time.Duration
-	if req.SignatureTTL != nil {
-		signatureTTL = *req.SignatureTTL
-	} else {
-		signatureTTL = defaultSignatureTTL
-	}
-	var pageLimit int32
-	if req.PageLimit != 0 {
-		pageLimit = req.PageLimit
-	} else {
-		pageLimit = int32(defaultPageLimit)
-	}
-
-	// If there are no stores return an empty list of fragments.
-	if len(spec.Fragment.Stores) == 0 {
-		return []*pb.FragmentsResponse_FragmentTuple{}, nil
-	}
-
-	var tuples = make([]*pb.FragmentsResponse_FragmentTuple, 0, pageLimit)
-	var fragmentSet, err = fragment.WalkAllStores(ctx, req.Journal, spec.Fragment.Stores)
-	if err != nil {
-		return tuples, err
-	}
-
+	var tuples = make([]*pb.FragmentsResponse_FragmentTuple, 0, req.PageLimit)
 	var ind, found = fragmentSet.LongestOverlappingFragment(req.PageToken)
 	// If the PageToken offset is larger than the largest fragment all valid fragments
 	// have been returned in previous pages. Return empty slice of fragment tuples.
@@ -97,34 +91,40 @@ func serveFragments(
 		return tuples, nil
 	}
 
+	// After finding the PageToken offset find the first value in the index where the
+	// mode time is >= the req.Begin. The fragment set is ordered on offsets
+	// rather than ModTime, and this API returns returns fragments that represent a contigous
+	// chunk of the journal so once a fragment has been found to satisfy this check only evalute
+	// whether a fragment happened before req.End.
 	for i, f := range fragmentSet[ind:] {
-		if f.ModTime.Equal(req.Begin) || f.ModTime.After(req.Begin) {
+		if f.ModTime.Before(req.Begin) {
 			continue
 		}
-		ind = i
+		ind = ind + i
 		break
 	}
 
 	for _, f := range fragmentSet[ind:] {
-		// break if page is full.
 		if len(tuples) == cap(tuples) {
 			break
 		}
 
-		// If there is no BackingStore or ModeTime this is a live fragment and can be added to
-		// the list of tuples, but no signedURL can be consutructed for this fragment.
-		if f.BackingStore != "" && !f.ModTime.IsZero() {
+		// If the query is unbounded and there is no BackingStore or ModeTime this is a live fragment
+		// and can be added to the list of tuples, but no signedURL can be consutructed for this fragment.
+		if req.End.IsZero() && (f.BackingStore == "" && f.ModTime.IsZero()) {
 			tuples = append(tuples, &pb.FragmentsResponse_FragmentTuple{Fragment: &f.Fragment})
 			continue
 		}
 		// If the req.End is zero the query is considered unbounded. Otherwise
 		// if the current fragment is modified after req.End we have found the end of the query range,
-		// do not look further.
+		// do not look further. There may be more fragments which have a ModTime within the bound of
+		// the query but including them would not mean the returned fragments would not be contiguous.
+		// The "out of order" fragments will be returned in subsequent pages.
 		if !req.End.IsZero() && f.ModTime.After(req.End) {
 			break
 		}
 
-		var tupel, err = buildFragmentTuple(f.Fragment, signatureTTL)
+		var tupel, err = buildFragmentTuple(f.Fragment, *req.SignatureTTL)
 		if err != nil {
 			return tuples, err
 		}
@@ -146,6 +146,6 @@ func buildFragmentTuple(f pb.Fragment, ttl time.Duration) (*pb.FragmentsResponse
 
 	return &pb.FragmentsResponse_FragmentTuple{
 		Fragment:  &f,
-		SingedURL: signedURL,
+		SignedURL: signedURL,
 	}, nil
 }
