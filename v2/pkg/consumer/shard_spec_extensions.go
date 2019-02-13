@@ -451,6 +451,11 @@ func (m *GetHintsResponse) Validate() error {
 	return nil
 }
 
+// Validate returns an error if the GetHintsResponse_ResponseHints is not well-formed.
+func (m GetHintsResponse_ResponseHints) Validate() error {
+	return m.Hints.Validate()
+}
+
 func sourcesEq(a, b []ShardSpec_Source) bool {
 	if len(a) != len(b) {
 		return false
